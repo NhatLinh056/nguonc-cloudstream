@@ -41,9 +41,13 @@ class NguonCProvider : MainAPI() {
     private fun FilmItem.toSearchResponse(): SearchResponse? {
         val slug = this.slug ?: return null
         val title = this.name ?: return null
+        // Bóc số tập từ chuỗi (VD: "Tập 12" hoặc "Hoàn tất (12/12)" -> 12) để truyền đúng kiểu Int? vào addSub
+        val epCount = this.currentEpisode?.let {
+            Regex("""\d+""").find(it)?.value?.toIntOrNull()
+        }
         return newAnimeSearchResponse(title, "$mainUrl/api/film/$slug", TvType.TvSeries) {
             this.posterUrl = this@toSearchResponse.thumbUrl ?: this@toSearchResponse.posterUrl
-            addSub(this@toSearchResponse.currentEpisode)
+            addSub(epCount)
         }
     }
 
@@ -87,7 +91,7 @@ class NguonCProvider : MainAPI() {
                 } else {
                     "Tập $epName"
                 }
-                this.episode = epName.filter { it.isDigit() }.toIntOrNull() ?: (index + 1)
+                this.episode = Regex("""\d+""").find(epName)?.value?.toIntOrNull() ?: (index + 1)
             }
         }
 
