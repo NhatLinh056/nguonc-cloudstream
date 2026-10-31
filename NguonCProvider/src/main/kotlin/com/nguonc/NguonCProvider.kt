@@ -21,7 +21,6 @@ class NguonCProvider : MainAPI() {
         TvType.AsianDrama
     )
 
-    // Danh sách các hàng hiển thị trên trang chủ Android TV
     override val mainPage = mainPageOf(
         "$mainUrl/api/films/phim-moi-cap-nhat?page=" to "Phim Mới Cập Nhật",
         "$mainUrl/api/films/danh-sach/phim-bo?page=" to "Phim Bộ",
@@ -42,8 +41,9 @@ class NguonCProvider : MainAPI() {
     private fun FilmItem.toSearchResponse(): SearchResponse? {
         val slug = this.slug ?: return null
         val title = this.name ?: return null
-        return newTvSeriesSearchResponse(title, "$mainUrl/api/film/$slug", TvType.TvSeries) {
+        return newAnimeSearchResponse(title, "$mainUrl/api/film/$slug", TvType.TvSeries) {
             this.posterUrl = this@toSearchResponse.thumbUrl ?: this@toSearchResponse.posterUrl
+            addSub(this@toSearchResponse.currentEpisode)
         }
     }
 
@@ -61,7 +61,6 @@ class NguonCProvider : MainAPI() {
         val apiUrl = "$mainUrl/api/film/$slug"
         val movie = app.get(apiUrl).parsedSafe<DetailResponse>()?.movie ?: return null
 
-        // Gom các server trùng tập (VD: Tập 1 có cả Vietsub #1 và Thuyết Minh) vào chung 1 nút Tập 1
         val episodeMap = linkedMapOf<String, MutableList<SourceItem>>()
 
         movie.episodes?.forEach { server ->
@@ -120,18 +119,17 @@ class NguonCProvider : MainAPI() {
         sources.forEach { source ->
             val sName = "Nguồn C - ${source.serverName ?: "Default"}"
 
-            // TẦNG 1: Nếu API có sẵn link .m3u8 trực tiếp
-            val directM3u8 = source.m3u8
-            if (!directM3u8.isNullOrBlank()) {
+            // TẦNG 1: Link .m3u8 trực tiếp
+            if (!source.m3u8.isNullOrBlank()) {
                 M3u8Helper.generateM3u8(
                     source = sName,
-                    streamUrl = directM3u8,
+                    streamUrl = source.m3u8,
                     referer = "$mainUrl/"
                 ).forEach(callback)
                 return@forEach
             }
 
-            // TẦNG 2: Bóc tách từ link embed (VD: https://embed.streamc.xyz/embed.php?hash=...)
+            // TẦNG 2: Bóc tách từ link embed
             val embedUrl = source.embed
             if (!embedUrl.isNullOrBlank()) {
                 var found = false
@@ -139,7 +137,6 @@ class NguonCProvider : MainAPI() {
                     val embedResponse = app.get(embedUrl, referer = "$mainUrl/")
                     val html = embedResponse.text
 
-                    // Tìm trực tiếp chuỗi .m3u8 trong mã nguồn trang embed
                     val m3u8Match = Regex("""(https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)""").find(html)?.groupValues?.get(1)
                     if (m3u8Match != null) {
                         val cleanUrl = m3u8Match.replace("\\/", "/")
@@ -151,7 +148,6 @@ class NguonCProvider : MainAPI() {
                         found = true
                     }
 
-                    // Cơ chế riêng của streamc.xyz: đổi embed.php?hash=... sang get.php?hash=...
                     if (!found && embedUrl.contains("embed.php")) {
                         val getPhpUrl = embedUrl.replace("embed.php", "get.php")
                         val getPhpText = app.get(
@@ -163,15 +159,17 @@ class NguonCProvider : MainAPI() {
                         val subMatch = Regex("""(https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*)""").find(getPhpText)?.groupValues?.get(1)
                         if (subMatch != null) {
                             val cleanUrl = subMatch.replace("\\/", "/")
+                            val isM3u8Link = cleanUrl.contains(".m3u8")
                             callback.invoke(
-                                ExtractorLink(
+                                newExtractorLink(
                                     source = sName,
                                     name = sName,
                                     url = cleanUrl,
-                                    referer = embedUrl,
-                                    quality = Qualities.Unknown.value,
-                                    isM3u8 = cleanUrl.contains(".m3u8")
-                                )
+                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = embedUrl
+                                    this.quality = Qualities.Unknown.value
+                                }
                             )
                             found = true
                         }
@@ -180,7 +178,7 @@ class NguonCProvider : MainAPI() {
                     e.printStackTrace()
                 }
 
-                // TẦNG 3: Dùng WebViewResolver ngầm của CloudStream để bắt gói tin .m3u8/.mp4
+                // TẦNG 3: Dùng WebViewResolver ngầm
                 if (!found) {
                     try {
                         val resolver = WebViewResolver(
@@ -196,15 +194,17 @@ class NguonCProvider : MainAPI() {
                         )
                         val interceptedUrl = resolved.url
                         if (interceptedUrl.contains(".m3u8") || interceptedUrl.contains(".mp4")) {
+                            val isM3u8Link = interceptedUrl.contains(".m3u8")
                             callback.invoke(
-                                ExtractorLink(
+                                newExtractorLink(
                                     source = sName,
                                     name = sName,
                                     url = interceptedUrl,
-                                    referer = embedUrl,
-                                    quality = Qualities.Unknown.value,
-                                    isM3u8 = interceptedUrl.contains(".m3u8")
-                                )
+                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = embedUrl
+                                    this.quality = Qualities.Unknown.value
+                                }
                             )
                         }
                     } catch (e: Exception) {
@@ -216,7 +216,6 @@ class NguonCProvider : MainAPI() {
         return true
     }
 
-    // Các Data Class ánh xạ JSON
     data class ListResponse(@JsonProperty("items") val items: List<FilmItem>? = null)
 
     data class FilmItem(
