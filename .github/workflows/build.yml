@@ -30,7 +30,8 @@ jobs:
 
       - name: Compile Plugin (.cs3) & Generate plugins.json
         run: |
-          gradle make makePluginsJson --stacktrace
+          set -o pipefail
+          gradle make makePluginsJson --stacktrace 2>&1 | tee gradle_build.log || (echo "### Gradle Build Log" >> $GITHUB_STEP_SUMMARY && echo '```text' >> $GITHUB_STEP_SUMMARY && tail -n 120 gradle_build.log >> $GITHUB_STEP_SUMMARY && echo '```' >> $GITHUB_STEP_SUMMARY && exit 1)
           mkdir -p build_output
           find . -name "*.cs3" -exec cp {} build_output/ \;
           find . -name "plugins.json" -exec cp {} build_output/ \;
