@@ -62,10 +62,11 @@ subprojects {
     }
 
     dependencies {
-        val apk by configurations
+        val cloudstream by configurations
         val implementation by configurations
 
-        apk("com.lagradost:cloudstream3:pre-release")
+        // Bản mới của CloudStream Gradle đã đổi từ apk(...) sang cloudstream(...)
+        cloudstream("com.lagradost:cloudstream3:pre-release")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
         implementation("org.jsoup:jsoup:1.17.2")
