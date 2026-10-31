@@ -1,0 +1,25 @@
+[
+    {
+        "iconUrl": "https://phim.nguonc.com/public/images/Logo/logonguonc.png",
+        "fileHash": "sha256-93637d89339f5e6d42dbac73abcf0864b4ed1358ef486ef45e795f6fedd3a494",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/NhatLinh056/nguonc-cloudstream",
+        "fileSize": 27264,
+        "status": 1,
+        "language": "vi",
+        "authors": [
+            "Personal"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "AsianDrama"
+        ],
+        "version": 3,
+        "internalName": "NguonCProvider",
+        "description": "Xem phim c\u1eadp nh\u1eadt h\u00e0ng ng\u00e0y t\u1eeb API Ngu\u1ed3n C",
+        "url": "https://raw.githubusercontent.com/NhatLinh056/nguonc-cloudstream/builds/NguonCProvider.cs3",
+        "name": "NguonCProvider"
+    }
+]
