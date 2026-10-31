@@ -23,6 +23,9 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -30,7 +33,7 @@ jobs:
 
       - name: Compile Plugin (.cs3) & Generate plugins.json
         run: |
-          gradle make makePluginsJson
+          gradle make makePluginsJson --stacktrace
           mkdir -p build_output
           find . -name "*.cs3" -exec cp {} build_output/ \;
           find . -name "plugins.json" -exec cp {} build_output/ \;
@@ -43,4 +46,3 @@ jobs:
           publish_dir: ./build_output
           publish_branch: builds
           force_orphan: true
-

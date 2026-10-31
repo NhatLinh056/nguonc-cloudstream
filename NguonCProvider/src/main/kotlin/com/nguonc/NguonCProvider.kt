@@ -42,9 +42,8 @@ class NguonCProvider : MainAPI() {
     private fun FilmItem.toSearchResponse(): SearchResponse? {
         val slug = this.slug ?: return null
         val title = this.name ?: return null
-        return newAnimeSearchResponse(title, "$mainUrl/api/film/$slug", TvType.TvSeries) {
+        return newTvSeriesSearchResponse(title, "$mainUrl/api/film/$slug", TvType.TvSeries) {
             this.posterUrl = this@toSearchResponse.thumbUrl ?: this@toSearchResponse.posterUrl
-            addSub(this@toSearchResponse.currentEpisode)
         }
     }
 
@@ -122,10 +121,11 @@ class NguonCProvider : MainAPI() {
             val sName = "Nguồn C - ${source.serverName ?: "Default"}"
 
             // TẦNG 1: Nếu API có sẵn link .m3u8 trực tiếp
-            if (!source.m3u8.isNullOrBlank()) {
+            val directM3u8 = source.m3u8
+            if (!directM3u8.isNullOrBlank()) {
                 M3u8Helper.generateM3u8(
                     source = sName,
-                    streamUrl = source.m3u8,
+                    streamUrl = directM3u8,
                     referer = "$mainUrl/"
                 ).forEach(callback)
                 return@forEach
@@ -255,4 +255,3 @@ class NguonCProvider : MainAPI() {
         val embed: String? = null
     )
 }
-

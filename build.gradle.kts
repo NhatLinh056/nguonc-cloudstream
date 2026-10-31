@@ -1,5 +1,5 @@
-import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import com.android.build.gradle.BaseExtension
+import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 
 buildscript {
     repositories {
@@ -22,8 +22,11 @@ allprojects {
     }
 }
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
-fun Project.android(configuration: BaseExtension.() -> Unit) = extensions.getByName<BaseExtension>("android").configuration()
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
+    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+
+fun Project.android(configuration: BaseExtension.() -> Unit) =
+    extensions.getByName<BaseExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
@@ -35,10 +38,10 @@ subprojects {
     }
 
     android {
-        compileSdkVersion(34)
-
+        namespace = "com.nguonc"
         defaultConfig {
             minSdk = 21
+            compileSdk = 34
             targetSdk = 34
         }
 
@@ -60,18 +63,12 @@ subprojects {
     }
 
     dependencies {
-        val apk by configurations
         val implementation by configurations
 
-        apk("com.lagradost:cloudstream3:pre-release")
-        implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.4.11")
-        implementation("org.jsoup:jsoup:1.17.2")
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.16.1")
+        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
     }
 }
 
 task<Delete>("clean") {
-    delete(rootProject.buildDir)
+    delete(rootProject.layout.buildDirectory)
 }
-
