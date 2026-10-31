@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import java.net.URI
 import java.net.URLEncoder
 
 class NguonCProvider : MainAPI() {
@@ -41,7 +42,6 @@ class NguonCProvider : MainAPI() {
     private fun FilmItem.toSearchResponse(): SearchResponse? {
         val slug = this.slug ?: return null
         val title = this.name ?: return null
-        // Bóc số tập từ chuỗi (VD: "Tập 12" hoặc "Hoàn tất (12/12)" -> 12) để truyền đúng kiểu Int? vào addSub
         val epCount = this.currentEpisode?.let {
             Regex("""\d+""").find(it)?.value?.toIntOrNull()
         }
@@ -112,82 +112,139 @@ class NguonCProvider : MainAPI() {
         }
     }
 
+    private suspend fun emitStreamLink(
+        callback: (ExtractorLink) -> Unit,
+        sourceName: String,
+        rawUrl: String,
+        refererUrl: String
+    ) {
+        val cleanUrl = rawUrl.replace("\\/", "/").trim()
+        if (!cleanUrl.startsWith("http")) return
+
+        val origin = try {
+            val uri = URI(refererUrl)
+            "${uri.scheme}://${uri.host}"
+        } catch (e: Exception) {
+            mainUrl
+        }
+
+        val isM3u8 = cleanUrl.contains(".m3u8") || !cleanUrl.contains(".mp4")
+        callback.invoke(
+            newExtractorLink(
+                source = sourceName,
+                name = sourceName,
+                url = cleanUrl,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = refererUrl
+                this.quality = Qualities.P1080.value
+                this.headers = mapOf(
+                    "Referer" to refererUrl,
+                    "Origin" to origin,
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
+        )
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val sources = parseJson<List<SourceItem>>(data)
+        // QUAN TRỌNG: Cắt bỏ phần mainUrl ("https://phim.nguonc.com/") mà hàm fixUrl của CloudStream tự động gắn vào trước chuỗi JSON
+        val cleanJson = if (data.contains("[")) {
+            "[" + data.substringAfter("[")
+        } else {
+            data
+        }
+
+        val sources = try {
+            parseJson<List<SourceItem>>(cleanJson)
+        } catch (e: Exception) {
+            emptyList()
+        }
 
         sources.forEach { source ->
             val sName = "Nguồn C - ${source.serverName ?: "Default"}"
 
-            // TẦNG 1: Link .m3u8 trực tiếp
+            // TẦNG 1: Nếu API trả sẵn link .m3u8 trực tiếp
             if (!source.m3u8.isNullOrBlank()) {
-                M3u8Helper.generateM3u8(
-                    source = sName,
-                    streamUrl = source.m3u8,
-                    referer = "$mainUrl/"
-                ).forEach(callback)
-                return@forEach
+                emitStreamLink(callback, sName, source.m3u8, "$mainUrl/")
             }
 
-            // TẦNG 2: Bóc tách từ link embed
-            val embedUrl = source.embed
+            // TẦNG 2: Bóc tách từ link embed (VD: https://embed.streamc.xyz/embed.php?hash=...)
+            val embedUrl = source.embed?.replace("\\/", "/")?.trim()
             if (!embedUrl.isNullOrBlank()) {
                 var found = false
                 try {
-                    val embedResponse = app.get(embedUrl, referer = "$mainUrl/")
+                    val embedOrigin = try {
+                        val uri = URI(embedUrl)
+                        "${uri.scheme}://${uri.host}"
+                    } catch (e: Exception) {
+                        "https://embed.streamc.xyz"
+                    }
+
+                    val embedResponse = app.get(
+                        embedUrl,
+                        referer = "$mainUrl/",
+                        headers = mapOf(
+                            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                        )
+                    )
                     val html = embedResponse.text
 
-                    val m3u8Match = Regex("""(https?://[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)""").find(html)?.groupValues?.get(1)
-                    if (m3u8Match != null) {
-                        val cleanUrl = m3u8Match.replace("\\/", "/")
-                        M3u8Helper.generateM3u8(
-                            source = sName,
-                            streamUrl = cleanUrl,
-                            referer = embedUrl
-                        ).forEach(callback)
+                    // 2.1: Tìm trực tiếp link .m3u8 / .mp4 hoặc biến file: "..." trong mã HTML của trang embed
+                    val directMatch = Regex("""(https?://[^\s"'<>\\]+?\.(?:m3u8|mp4)[^\s"'<>\\]*)""").find(html)?.groupValues?.get(1)
+                        ?: Regex("""["']?file["']?\s*:\s*["'](https?://[^"']+)["']""").find(html)?.groupValues?.get(1)
+
+                    if (directMatch != null) {
+                        emitStreamLink(callback, sName, directMatch, embedUrl)
                         found = true
                     }
 
-                    if (!found && embedUrl.contains("embed.php")) {
-                        val getPhpUrl = embedUrl.replace("embed.php", "get.php")
-                        val getPhpText = app.get(
-                            getPhpUrl,
-                            referer = embedUrl,
-                            headers = mapOf("X-Requested-With" to "XMLHttpRequest")
-                        ).text
+                    // 2.2: Cơ chế riêng của streamc.xyz (gọi sang get.php?hash=... hoặc ajax)
+                    if (!found && embedUrl.contains("hash=")) {
+                        val hash = embedUrl.substringAfter("hash=").substringBefore("&")
+                        val candidateUrls = listOf(
+                            embedUrl.replace("embed.php", "get.php"),
+                            "$embedOrigin/get.php?hash=$hash",
+                            "$embedOrigin/ajax.php?hash=$hash"
+                        ).distinct()
 
-                        val subMatch = Regex("""(https?://[^\s"'<>\\]+\.(?:m3u8|mp4)[^\s"'<>\\]*)""").find(getPhpText)?.groupValues?.get(1)
-                        if (subMatch != null) {
-                            val cleanUrl = subMatch.replace("\\/", "/")
-                            val isM3u8Link = cleanUrl.contains(".m3u8")
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = sName,
-                                    name = sName,
-                                    url = cleanUrl,
-                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = embedUrl
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            found = true
+                        for (apiEndpoint in candidateUrls) {
+                            val apiText = app.get(
+                                apiEndpoint,
+                                referer = embedUrl,
+                                headers = mapOf(
+                                    "X-Requested-With" to "XMLHttpRequest",
+                                    "Origin" to embedOrigin,
+                                    "Referer" to embedUrl
+                                )
+                            ).text
+
+                            val subMatch = Regex("""(https?://[^\s"'<>\\]+?\.(?:m3u8|mp4|txt)[^\s"'<>\\]*)""").find(apiText)?.groupValues?.get(1)
+                                ?: Regex("""["']?(?:file|url|source)["']?\s*:\s*["'](https?://[^"']+)["']""").find(apiText)?.groupValues?.get(1)
+
+                            if (subMatch != null) {
+                                emitStreamLink(callback, sName, subMatch, embedUrl)
+                                found = true
+                                break
+                            }
                         }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
 
-                // TẦNG 3: Dùng WebViewResolver ngầm
+                // TẦNG 3: Dùng WebViewResolver mở ngầm trang embed để bắt gói tin video thực tế
                 if (!found) {
                     try {
                         val resolver = WebViewResolver(
-                            interceptUrl = Regex("""\.(m3u8|mp4)(\?.*)?$"""),
-                            additionalUrls = listOf(Regex("""get\.php\?hash=""")),
+                            interceptUrl = Regex("""(\.m3u8|\.mp4|master\.txt|index\.m3u8|playlist\.m3u8|/hls/)"""),
+                            additionalUrls = listOf(Regex("""(\.m3u8|\.mp4|get\.php)""")),
                             useOkhttp = false,
                             timeout = 15_000L
                         )
@@ -197,19 +254,8 @@ class NguonCProvider : MainAPI() {
                             interceptor = resolver
                         )
                         val interceptedUrl = resolved.url
-                        if (interceptedUrl.contains(".m3u8") || interceptedUrl.contains(".mp4")) {
-                            val isM3u8Link = interceptedUrl.contains(".m3u8")
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = sName,
-                                    name = sName,
-                                    url = interceptedUrl,
-                                    type = if (isM3u8Link) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = embedUrl
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
+                        if (interceptedUrl.isNotBlank() && interceptedUrl != embedUrl) {
+                            emitStreamLink(callback, sName, interceptedUrl, embedUrl)
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -253,8 +299,8 @@ class NguonCProvider : MainAPI() {
     )
 
     data class SourceItem(
-        val serverName: String? = null,
-        val m3u8: String? = null,
-        val embed: String? = null
+        @JsonProperty("serverName") val serverName: String? = null,
+        @JsonProperty("m3u8") val m3u8: String? = null,
+        @JsonProperty("embed") val embed: String? = null
     )
 }
