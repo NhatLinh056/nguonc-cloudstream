@@ -1,3 +1,8 @@
+import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
+    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+
 version = 1
 
 cloudstream {
@@ -13,4 +18,3 @@ cloudstream {
     )
     iconUrl = "https://phim.nguonc.com/public/images/Logo/logonguonc.png"
 }
-
