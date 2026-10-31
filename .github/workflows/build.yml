@@ -1,0 +1,46 @@
+name: Build CloudStream Plugin
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
+
+      - name: Compile Plugin (.cs3) & Generate plugins.json
+        run: |
+          gradle make makePluginsJson
+          mkdir -p build_output
+          find . -name "*.cs3" -exec cp {} build_output/ \;
+          find . -name "plugins.json" -exec cp {} build_output/ \;
+          cp repo.json build_output/
+
+      - name: Deploy to builds branch
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build_output
+          publish_branch: builds
+          force_orphan: true
+
