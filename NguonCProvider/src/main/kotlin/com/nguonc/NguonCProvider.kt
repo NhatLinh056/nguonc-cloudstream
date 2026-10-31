@@ -22,6 +22,9 @@ class NguonCProvider : MainAPI() {
         TvType.AsianDrama
     )
 
+    private val userAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
     override val mainPage = mainPageOf(
         "$mainUrl/api/films/phim-moi-cap-nhat?page=" to "Phim Mới Cập Nhật",
         "$mainUrl/api/films/danh-sach/phim-bo?page=" to "Phim Bộ",
@@ -60,38 +63,96 @@ class NguonCProvider : MainAPI() {
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
+    // Hàm chuẩn hóa tên tập ("Tập 01", "Tap 1", "1" -> "1") để khớp chính xác giữa các server
+    private fun normalizeEpKey(rawName: String?): String {
+        if (rawName.isNullOrBlank()) return "full"
+        val num = Regex("""\d+""").find(rawName)?.value?.toIntOrNull()
+        return num?.toString() ?: rawName.lowercase().trim()
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         val slug = url.substringAfterLast("/")
         val apiUrl = "$mainUrl/api/film/$slug"
         val movie = app.get(apiUrl).parsedSafe<DetailResponse>()?.movie ?: return null
 
         val episodeMap = linkedMapOf<String, MutableList<SourceItem>>()
+        val displayNames = linkedMapOf<String, String>()
 
+        // 1. Nạp danh sách tập từ API Nguồn C
         movie.episodes?.forEach { server ->
-            val sName = server.serverName ?: "Server"
-            server.items?.forEach { ep ->
-                val epName = ep.name ?: "Full"
-                val list = episodeMap.getOrPut(epName) { mutableListOf() }
+            val sName = "Nguồn C (${server.serverName ?: "Server"})"
+            val epList = server.items ?: server.serverData ?: emptyList()
+            epList.forEach { ep ->
+                val rawName = ep.name ?: ep.slug ?: "Full"
+                val key = normalizeEpKey(rawName)
+                if (!displayNames.containsKey(key)) {
+                    displayNames[key] = if (rawName.lowercase().contains("tập") || rawName.lowercase().contains("full")) {
+                        rawName
+                    } else {
+                        "Tập $rawName"
+                    }
+                }
+                val list = episodeMap.getOrPut(key) { mutableListOf() }
                 list.add(
                     SourceItem(
                         serverName = sName,
-                        m3u8 = ep.m3u8,
-                        embed = ep.embed
+                        m3u8 = ep.m3u8 ?: ep.linkM3u8,
+                        embed = ep.embed ?: ep.linkEmbed
                     )
                 )
             }
         }
 
-        val episodes = episodeMap.entries.mapIndexed { index, entry ->
-            val epName = entry.key
-            val sourcesJson = entry.value.toJson()
-            newEpisode(sourcesJson) {
-                this.name = if (epName.lowercase().contains("tập") || epName.lowercase().contains("full")) {
-                    epName
-                } else {
-                    "Tập $epName"
+        // 2. Nạp bổ sung luồng .m3u8 trực tiếp từ KKPhim / OPhim có cùng slug (hoặc tìm theo tên phim) để chống trường hợp streamc.xyz chặn Cloudflare
+        try {
+            var kkDetail = app.get("https://phimapi.com/phim/$slug").parsedSafe<KKDetailResponse>()
+            if (kkDetail?.episodes.isNullOrEmpty() && !movie.name.isNullOrBlank()) {
+                val searchUrl = "https://phimapi.com/v1/api/tim-kiem?keyword=${URLEncoder.encode(movie.name, "UTF-8")}&limit=5"
+                val searchRes = app.get(searchUrl).parsedSafe<KKSearchWrapper>()
+                val matchedSlug = searchRes?.data?.items?.firstOrNull()?.slug
+                if (!matchedSlug.isNullOrBlank()) {
+                    kkDetail = app.get("https://phimapi.com/phim/$matchedSlug").parsedSafe<KKDetailResponse>()
                 }
-                this.episode = Regex("""\d+""").find(epName)?.value?.toIntOrNull() ?: (index + 1)
+            }
+
+            kkDetail?.episodes?.forEach { server ->
+                val sName = "Server Dự Phòng (${server.serverName ?: "HLS"})"
+                server.serverData?.forEach { ep ->
+                    val rawName = ep.name ?: ep.slug ?: "Full"
+                    val key = normalizeEpKey(rawName)
+                    if (!displayNames.containsKey(key)) {
+                        displayNames[key] = if (rawName.lowercase().contains("tập") || rawName.lowercase().contains("full")) {
+                            rawName
+                        } else {
+                            "Tập $rawName"
+                        }
+                    }
+                    val list = episodeMap.getOrPut(key) { mutableListOf() }
+                    if (!ep.linkM3u8.isNullOrBlank()) {
+                        // Đưa luồng .m3u8 trực tiếp lên đầu danh sách để phát tức thì
+                        list.add(
+                            0,
+                            SourceItem(
+                                serverName = sName,
+                                m3u8 = ep.linkM3u8,
+                                embed = ep.linkEmbed
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        val episodes = episodeMap.entries.mapIndexed { index, entry ->
+            val key = entry.key
+            val epLabel = displayNames[key] ?: "Tập ${index + 1}"
+            // Thêm tiền tố "http://nguonc.local/" để hàm fixUrl của CloudStream không làm hỏng chuỗi JSON
+            val payload = "http://nguonc.local/" + entry.value.toJson()
+            newEpisode(payload) {
+                this.name = epLabel
+                this.episode = key.toIntOrNull() ?: (index + 1)
             }
         }
 
@@ -104,7 +165,7 @@ class NguonCProvider : MainAPI() {
                 this.plot = cleanPlot
             }
         } else {
-            newMovieLoadResponse(movie.name ?: "", apiUrl, TvType.Movie, episodes.firstOrNull()?.data ?: "[]") {
+            newMovieLoadResponse(movie.name ?: "", apiUrl, TvType.Movie, episodes.firstOrNull()?.data ?: "") {
                 this.posterUrl = movie.thumbUrl ?: movie.posterUrl
                 this.backgroundPosterUrl = movie.posterUrl ?: movie.thumbUrl
                 this.plot = cleanPlot
@@ -141,7 +202,7 @@ class NguonCProvider : MainAPI() {
                 this.headers = mapOf(
                     "Referer" to refererUrl,
                     "Origin" to origin,
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    "User-Agent" to userAgent
                 )
             }
         )
@@ -153,11 +214,10 @@ class NguonCProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // QUAN TRỌNG: Cắt bỏ phần mainUrl ("https://phim.nguonc.com/") mà hàm fixUrl của CloudStream tự động gắn vào trước chuỗi JSON
         val cleanJson = if (data.contains("[")) {
             "[" + data.substringAfter("[")
         } else {
-            data
+            return false
         }
 
         val sources = try {
@@ -167,95 +227,72 @@ class NguonCProvider : MainAPI() {
         }
 
         sources.forEach { source ->
-            val sName = "Nguồn C - ${source.serverName ?: "Default"}"
+            val sName = source.serverName ?: "Nguồn C"
 
-            // TẦNG 1: Nếu API trả sẵn link .m3u8 trực tiếp
+            // 1. Phát ngay lập tức nếu có sẵn luồng .m3u8 trực tiếp
             if (!source.m3u8.isNullOrBlank()) {
                 emitStreamLink(callback, sName, source.m3u8, "$mainUrl/")
             }
 
-            // TẦNG 2: Bóc tách từ link embed (VD: https://embed.streamc.xyz/embed.php?hash=...)
+            // 2. Xử lý link embed (VD: https://embed2.streamc.xyz/embed.php?hash=...)
             val embedUrl = source.embed?.replace("\\/", "/")?.trim()
-            if (!embedUrl.isNullOrBlank()) {
-                var found = false
+            if (!embedUrl.isNullOrBlank() && source.m3u8.isNullOrBlank()) {
+                var resolvedSuccess = false
+                val embedOrigin = try {
+                    val uri = URI(embedUrl)
+                    "${uri.scheme}://${uri.host}"
+                } catch (e: Exception) {
+                    "https://embed2.streamc.xyz"
+                }
+
+                // 2.1: Thử lấy qua HTTP kèm đầy đủ Sec-Fetch Headers chuẩn trình duyệt và Referer của phim.nguonc.com
                 try {
-                    val embedOrigin = try {
-                        val uri = URI(embedUrl)
-                        "${uri.scheme}://${uri.host}"
-                    } catch (e: Exception) {
-                        "https://embed.streamc.xyz"
-                    }
-
-                    val embedResponse = app.get(
-                        embedUrl,
-                        referer = "$mainUrl/",
-                        headers = mapOf(
-                            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                        )
+                    val browserHeaders = mapOf(
+                        "User-Agent" to userAgent,
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Accept-Language" to "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                        "Referer" to "$mainUrl/",
+                        "Sec-Fetch-Dest" to "iframe",
+                        "Sec-Fetch-Mode" to "navigate",
+                        "Sec-Fetch-Site" to "cross-site",
+                        "Upgrade-Insecure-Requests" to "1"
                     )
-                    val html = embedResponse.text
 
-                    // 2.1: Tìm trực tiếp link .m3u8 / .mp4 hoặc biến file: "..." trong mã HTML của trang embed
-                    val directMatch = Regex("""(https?://[^\s"'<>\\]+?\.(?:m3u8|mp4)[^\s"'<>\\]*)""").find(html)?.groupValues?.get(1)
-                        ?: Regex("""["']?file["']?\s*:\s*["'](https?://[^"']+)["']""").find(html)?.groupValues?.get(1)
+                    val html = app.get(embedUrl, headers = browserHeaders).text
+                    if (!html.contains("You have been blocked")) {
+                        val m3u8Match = Regex("""(https?://[^\s"'<>\\]+?\.(?:m3u8|mp4)[^\s"'<>\\]*)""").find(html)?.groupValues?.get(1)
+                            ?: Regex("""["']?(?:file|source|url)["']?\s*:\s*["'](https?://[^"']+)["']""").find(html)?.groupValues?.get(1)
 
-                    if (directMatch != null) {
-                        emitStreamLink(callback, sName, directMatch, embedUrl)
-                        found = true
-                    }
-
-                    // 2.2: Cơ chế riêng của streamc.xyz (gọi sang get.php?hash=... hoặc ajax)
-                    if (!found && embedUrl.contains("hash=")) {
-                        val hash = embedUrl.substringAfter("hash=").substringBefore("&")
-                        val candidateUrls = listOf(
-                            embedUrl.replace("embed.php", "get.php"),
-                            "$embedOrigin/get.php?hash=$hash",
-                            "$embedOrigin/ajax.php?hash=$hash"
-                        ).distinct()
-
-                        for (apiEndpoint in candidateUrls) {
-                            val apiText = app.get(
-                                apiEndpoint,
-                                referer = embedUrl,
-                                headers = mapOf(
-                                    "X-Requested-With" to "XMLHttpRequest",
-                                    "Origin" to embedOrigin,
-                                    "Referer" to embedUrl
-                                )
-                            ).text
-
-                            val subMatch = Regex("""(https?://[^\s"'<>\\]+?\.(?:m3u8|mp4|txt)[^\s"'<>\\]*)""").find(apiText)?.groupValues?.get(1)
-                                ?: Regex("""["']?(?:file|url|source)["']?\s*:\s*["'](https?://[^"']+)["']""").find(apiText)?.groupValues?.get(1)
-
-                            if (subMatch != null) {
-                                emitStreamLink(callback, sName, subMatch, embedUrl)
-                                found = true
-                                break
-                            }
+                        if (m3u8Match != null) {
+                            emitStreamLink(callback, sName, m3u8Match, "$embedOrigin/")
+                            resolvedSuccess = true
                         }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
 
-                // TẦNG 3: Dùng WebViewResolver mở ngầm trang embed để bắt gói tin video thực tế
-                if (!found) {
+                // 2.2: Dùng WebView thật của Android để vượt Cloudflare challenge và chặn bắt link .m3u8/.mp4
+                if (!resolvedSuccess) {
                     try {
                         val resolver = WebViewResolver(
-                            interceptUrl = Regex("""(\.m3u8|\.mp4|master\.txt|index\.m3u8|playlist\.m3u8|/hls/)"""),
-                            additionalUrls = listOf(Regex("""(\.m3u8|\.mp4|get\.php)""")),
+                            interceptUrl = Regex("""(\.m3u8|\.mp4|master\.txt|playlist\.m3u8|/hls/|get\.php)"""),
+                            additionalUrls = listOf(Regex("""(\.m3u8|\.mp4)""")),
                             useOkhttp = false,
-                            timeout = 15_000L
+                            timeout = 20_000L
                         )
-                        val resolved = app.get(
+                        val result = app.get(
                             embedUrl,
                             referer = "$mainUrl/",
+                            headers = mapOf(
+                                "User-Agent" to userAgent,
+                                "Referer" to "$mainUrl/"
+                            ),
                             interceptor = resolver
                         )
-                        val interceptedUrl = resolved.url
-                        if (interceptedUrl.isNotBlank() && interceptedUrl != embedUrl) {
-                            emitStreamLink(callback, sName, interceptedUrl, embedUrl)
+                        val intercepted = result.url
+                        if (intercepted.isNotBlank() && intercepted != embedUrl && !intercepted.contains("embed.php")) {
+                            emitStreamLink(callback, sName, intercepted, "$embedOrigin/")
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -266,6 +303,7 @@ class NguonCProvider : MainAPI() {
         return true
     }
 
+    // Các Data Class của Nguồn C
     data class ListResponse(@JsonProperty("items") val items: List<FilmItem>? = null)
 
     data class FilmItem(
@@ -289,13 +327,26 @@ class NguonCProvider : MainAPI() {
 
     data class ServerGroup(
         @JsonProperty("server_name") val serverName: String? = null,
-        @JsonProperty("items") val items: List<EpisodeItem>? = null
+        @JsonProperty("items") val items: List<EpisodeItem>? = null,
+        @JsonProperty("server_data") val serverData: List<EpisodeItem>? = null
     )
 
     data class EpisodeItem(
         @JsonProperty("name") val name: String? = null,
+        @JsonProperty("slug") val slug: String? = null,
         @JsonProperty("embed") val embed: String? = null,
-        @JsonProperty("m3u8") val m3u8: String? = null
+        @JsonProperty("link_embed") val linkEmbed: String? = null,
+        @JsonProperty("m3u8") val m3u8: String? = null,
+        @JsonProperty("link_m3u8") val linkM3u8: String? = null
+    )
+
+    // Các Data Class hỗ trợ lấy link .m3u8 dự phòng trực tiếp
+    data class KKDetailResponse(
+        @JsonProperty("episodes") val episodes: List<ServerGroup>? = null
+    )
+
+    data class KKSearchWrapper(
+        @JsonProperty("data") val data: ListResponse? = null
     )
 
     data class SourceItem(
