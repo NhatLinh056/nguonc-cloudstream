@@ -3,7 +3,6 @@
   "description": "Extension xem phim Nguồn C trực tiếp trên Android TV",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/<https://github.com/NhatLinh056/nguonc-cloudstream>/<TEN_REPO>/builds/plugins.json"
+    "https://raw.githubusercontent.com/NhatLinh056/nguonc-cloudstream/builds/plugins.json"
   ]
 }
-
